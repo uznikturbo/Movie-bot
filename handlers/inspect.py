@@ -5,11 +5,13 @@ import random
 from aiogram import Router, types
 from aiogram.fsm.context import FSMContext
 from aiogram.types import ReplyKeyboardRemove
+from aiohttp import ClientSession
 from langdetect import detect
 from langdetect.lang_detect_exception import LangDetectException
 
+from config import API_KEY
 from db import load_films, save_film
-from keyboards import add_or_no_kb, inspect_kb, main_kb, viewed_or_not_kb
+from keyboards import add_or_no_kb, inspect_kb, main_kb, random_kb, viewed_or_not_kb
 from states import InspectFilmState
 from utils import format_film_info, search_tmdb_film
 
@@ -72,19 +74,9 @@ async def inspect_by_description_handler(message: types.Message, state: FSMConte
 
 
 @router.message(lambda m: m.text == "Inspect random film")
-async def inspect_random_film(message: types.Message):
-    films = await load_films(message.from_user.id)
-
-    if not films:
-        await message.answer("No movies found.", reply_markup=main_kb)
-        return
-
-    name, info = random.choice(list(films.items()))
-    text = format_film_info(name, info)
-
-    await message.answer(
-        f"<b>Random film:</b>\n\n{text}", parse_mode="HTML", reply_markup=main_kb
-    )
+async def inspect_random_film(message: types.Message, state: FSMContext):
+    await message.answer("Select an option:", reply_markup=random_kb)
+    await state.set_state(InspectFilmState.waiting_for_random)
 
 
 @router.message(lambda m: m.text == "Inspect by tag")
@@ -337,4 +329,80 @@ async def get_film_by_tag(message: types.Message, state: FSMContext):
             reply_markup=main_kb,
             disable_web_page_preview=(len(matched_films) > 1),
         )
+    await state.clear()
+
+
+@router.message(InspectFilmState.waiting_for_random)
+async def random_film_handler(message: types.Message, state: FSMContext):
+    answer = message.text.strip().lower()
+    if not answer or answer not in ("from own collection", "via tmdb"):
+        await message.answer("Use keyboard buttons")
+        return
+
+    if answer == "from own collection":
+        films = await load_films(message.from_user.id)
+
+        if not films:
+            await message.answer("No movies found.", reply_markup=main_kb)
+            return
+
+        name, info = random.choice(list(films.items()))
+        text = format_film_info(name, info)
+
+        await message.answer(
+            f"<b>Random film:</b>\n\n{text}", parse_mode="HTML", reply_markup=main_kb
+        )
+    elif answer == "via tmdb":
+        total_pages = 500
+        random_page = random.randint(1, total_pages)
+
+        url = "https://api.themoviedb.org/3/discover/movie"
+        params = {
+            "api_key": API_KEY,
+            "sort_by": "popularity.desc",
+            "page": random_page,
+        }
+
+        async with ClientSession() as session:
+            async with session.get(url, params=params) as response:
+                data = await response.json()
+                results = data.get("results", [])
+
+                if not results:
+                    await message.answer("Could not fetch films from TMDb.")
+                    return
+
+                film = random.choice(results)
+                title = film.get("title") or film.get("name")
+                overview = film.get("overview") or "No description"
+                rating = film.get("vote_average", 0)
+                year = (film.get("release_date") or "Unknown")[:4]
+                poster_url = (
+                    f"https://image.tmdb.org/t/p/w500{film['poster_path']}"
+                    if film.get("poster_path")
+                    else ""
+                )
+                trailer_url = ""  # Можно добавить запрос позже
+
+                # Структура для сохранения
+                film_data = {
+                    "year": year,
+                    "genre": "Unknown",  # жанры можно подтянуть, если хочешь
+                    "rating": rating,
+                    "description": overview,
+                    "poster_url": poster_url,
+                    "trailer": trailer_url,
+                    "tag": "Not set",
+                }
+
+                text = (
+                    f"<b>Random TMDb film:</b>\n\n{format_film_info(title, film_data)}"
+                )
+
+                await message.answer(
+                    f"{text}",
+                    parse_mode="HTML",
+                    disable_web_page_preview=False,
+                    reply_markup=main_kb,
+                )
     await state.clear()
